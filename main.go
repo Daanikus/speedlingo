@@ -9,10 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-github/github"
 	"github.com/juju/errors"
+	"github.com/urfave/cli"
 	"golang.org/x/oauth2"
 	git "gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/plumbing"
@@ -28,8 +30,8 @@ type config struct {
 }
 
 const yamlDataReview = `tenets:
-  - import: codelingo/code-review-comments
-  - import: codelingo/effective-go
+  - import: codelingo/go/ticker-in-for-switch
+  - import: codelingo/effective-go/loop-variable-used-in-go-routine
 `
 const yamlDataRewrite = `tenets:
   - import: codelingo/effective-go/comment-first-word-as-subject
@@ -37,7 +39,7 @@ const yamlDataRewrite = `tenets:
 const ignoreData = `vendor/`
 const yamlName = "codelingo.yaml"
 const ignoreFileName = ".codelingoignore"
-const commitMessageRewrite = "Update comments based on best practices from Effective Go"
+const commitMessageRewrite = "Rewrite from CodeLingo"
 const branchName = "rewrite"
 
 var configFile = os.Getenv("GOPATH") + "/src/speedlingo/config.yaml"
@@ -45,40 +47,83 @@ var reviewResultsDir = os.Getenv("HOME") + "/speedlingo-review-results"
 var conf config
 
 func main() {
+	ctx := context.Background()
+	app := cli.NewApp()
+	c, err := unmarshalConfigFile()
+	if err != nil {
+		panic(err)
+	}
+	conf = c
+
+	app.Flags = []cli.Flag{
+		cli.StringFlag{
+			Name: "file",
+		},
+		cli.StringFlag{
+			Name:  "action",
+			Value: "review",
+		},
+	}
+
+	app.Action = func(c *cli.Context) error {
+		authedClient := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: conf.Token}))
+		client := github.NewClient(authedClient)
+		wg := sync.WaitGroup{}
+		action := c.String("action")
+
+		data, err := ioutil.ReadFile(c.String("file"))
+		if err != nil {
+			return err
+		}
+
+		lines := strings.Split(string(data), "\n")
+
+		for _, line := range lines {
+			wg.Add(1)
+			go func(l string) {
+				defer wg.Done()
+				if l == "" {
+					return
+				}
+				sp := strings.Split(l, "/")
+
+				owner := sp[0]
+				name := sp[1]
+				if err := run(ctx, client, action, owner, name); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v", err)
+				}
+			}(line)
+		}
+		wg.Wait()
+		return nil
+	}
+
+	err = app.Run(os.Args)
+	if err != nil {
+		panic(err)
+	}
+
+}
+
+func run(ctx context.Context, client *github.Client, command, owner, repo string) error {
 	var rf *github.Repository
 	var err error
-	ctx := context.Background()
-	if len(os.Args) != 4 {
-		fmt.Println("Usage: speedlingo <command> <owner> <repo name>")
-		os.Exit(1)
-	}
 
 	if err = os.MkdirAll(reviewResultsDir, 0755); err != nil {
-		log.Fatal(err)
+		return err
 	}
-
-	conf, err = unmarshalConfigFile()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	owner := os.Args[2]
-	repo := os.Args[3]
-
-	authedClient := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: conf.Token}))
-	client := github.NewClient(authedClient)
 
 	rf, _, err = client.Repositories.CreateFork(ctx, owner, repo, nil)
 	if err != nil {
 		if !strings.Contains(err.Error(), "job scheduled on GitHub side; try again later") {
-			log.Fatal(err)
+			return err
 		}
 	}
-
+	fmt.Println(conf)
 	timeout := time.Now().Add(time.Minute * 5)
 	for {
 		if time.Now().After(timeout) {
-			log.Fatal(err)
+			return err
 		}
 
 		rf, _, err = client.Repositories.Get(ctx, conf.Username, repo)
@@ -95,7 +140,7 @@ func main() {
 	// Tempdir to clone the repository
 	dir, err := ioutil.TempDir("", "")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer os.RemoveAll(dir) // clean up
 
@@ -107,27 +152,29 @@ func main() {
 		Progress: os.Stdout,
 	})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	fmt.Println("Cloned to", dir)
 
 	var cmd *exec.Cmd
-	switch command := os.Args[1]; command {
+	switch command {
 	case "review":
 		fmt.Println("Results will be stored in", reviewResultsDir)
-		cmd = exec.Command("lingo", "run", "review", "--debug", "--keep-all", "-o", reviewResultsDir+"/"+repo+"-"+"results.json")
+		cmd = exec.Command("lingo", "run", "review", "--debug", "--keep-all", "--no-fatal", "-o", reviewResultsDir+"/"+repo+"-"+"results.json")
 		if err := handleReview(dir, conf.Token, r, cmd); err != nil {
-			log.Fatal(err)
+			return err
 		}
 	case "rewrite":
-		cmd = exec.Command("lingo", "run", "rewrite", "--debug", "--keep-all")
+		cmd = exec.Command("lingo", "run", "rewrite", "--no-fatal", "--debug", "--keep-all")
 		if err := handleRewrite(dir, conf.Token, r, cmd); err != nil {
-			log.Fatal(err)
+			return err
 		}
 	default:
 		log.Fatal(errors.New("command not found. Commands available: review, rewrite"))
 	}
+
+	return nil
 }
 
 func runCmd(dir string, cmd *exec.Cmd) error {
@@ -271,7 +318,7 @@ func handleReview(dir, token string, r *git.Repository, cmd *exec.Cmd) error {
 	}
 
 	filename := filepath.Join(dir, yamlName)
-	err = ioutil.WriteFile(filename, []byte(yamlDataRewrite), 0666)
+	err = ioutil.WriteFile(filename, []byte(yamlDataReview), 0666)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -300,5 +347,8 @@ func unmarshalConfigFile() (config, error) {
 		return config{}, errors.Trace(err)
 	}
 	err = yaml.UnmarshalStrict([]byte(str), &result)
+	if err != nil {
+		return config{}, errors.Trace(err)
+	}
 	return result, nil
 }

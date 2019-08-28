@@ -102,6 +102,14 @@
   version = "v1.4.0"
 
 [[projects]]
+  digest = "1:ca4df663ad76879ad38dbd736493679cbb1aa596c6d479fd9fc5e959e5ceb4fb"
+  name = "github.com/urfave/cli"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "e6cf83ec39f6e1158ced1927d4ed14578fda8edb"
+  version = "v1.21.0"
+
+[[projects]]
   digest = "1:172f94a6b3644a8f9e6b5e5b7fc9fe1e42d424f52a0300b2e7ab1e57db73f85d"
   name = "github.com/xanzy/ssh-agent"
   packages = ["."]
@@ -266,6 +274,7 @@
   input-imports = [
     "github.com/google/go-github/github",
     "github.com/juju/errors",
+    "github.com/urfave/cli",
     "golang.org/x/oauth2",
     "gopkg.in/src-d/go-git.v4",
     "gopkg.in/src-d/go-git.v4/plumbing",
